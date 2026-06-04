@@ -1,0 +1,16 @@
+services:
+  corridor:
+    build: .
+    container_name: corridor
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - corridor_data:/data
+    environment:
+      - CORRIDOR_DB=/data/corridor.db
+      - CORRIDOR_TTL=60        # 便签过期时间（分钟）
+      - CORRIDOR_PORT=8090
+
+volumes:
+  corridor_data:

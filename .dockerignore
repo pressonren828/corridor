@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.git/
+.gitignore
+.dockerignore
+.venv/
+venv/
+env/
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
