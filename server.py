@@ -22,6 +22,7 @@ from mcp.server.fastmcp import FastMCP
 DB_PATH = os.environ.get("CORRIDOR_DB", "/data/corridor.db")
 TTL_MINUTES = int(os.environ.get("CORRIDOR_TTL", "60"))
 PORT = int(os.environ.get("CORRIDOR_PORT", "8090"))
+TRANSPORT = os.environ.get("CORRIDOR_TRANSPORT", "streamable-http")
 
 mcp = FastMCP(
     "走廊 Corridor",
@@ -570,4 +571,4 @@ def clear_identity(key: str) -> str:
 _init()
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    mcp.run(transport=TRANSPORT)
