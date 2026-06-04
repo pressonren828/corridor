@@ -25,7 +25,9 @@ PORT = int(os.environ.get("CORRIDOR_PORT", "8090"))
 
 mcp = FastMCP(
     "走廊 Corridor",
-    description="跨窗口状态同步 - 连接你的卧室、书房和工坊",
+    instructions="跨窗口状态同步 - 连接你的卧室、书房和工坊",
+    host="0.0.0.0",
+    port=PORT,
 )
 
 
@@ -568,4 +570,4 @@ def clear_identity(key: str) -> str:
 _init()
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=PORT)
+    mcp.run(transport="sse")
