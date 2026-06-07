@@ -4,7 +4,6 @@
 连接 claude.ai 里的卧室、书房、工坊等 project/chat：
 - 横向切换：从一个房间 pack 便签，到另一个房间 arrive 接上状态。
 - 纵向接续：同一房间新 chat 通过上次 session 记录接上温度。
-- 阶段归档：多条 session 压缩成长期 archive。
 """
 
 from __future__ import annotations
@@ -64,35 +63,20 @@ def _init() -> None:
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             room       TEXT NOT NULL,
             summary    TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            archived   INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS identity (
-            key        TEXT PRIMARY KEY,
-            value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS archives (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            room          TEXT NOT NULL,
-            summary       TEXT NOT NULL,
-            session_count INTEGER,
             created_at    TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_ho_to
             ON handoffs(to_room, consumed);
         CREATE INDEX IF NOT EXISTS idx_sess_room
             ON sessions(room, created_at);
-        CREATE INDEX IF NOT EXISTS idx_archives_room
-            ON archives(room, created_at);
         """
     )
 
     # Migrate v1 databases: handoffs used to have only note, no recent_context.
     if "recent_context" not in _table_columns(c, "handoffs"):
         c.execute("ALTER TABLE handoffs ADD COLUMN recent_context TEXT NOT NULL DEFAULT ''")
-    if "archived" not in _table_columns(c, "sessions"):
-        c.execute("ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0")
+    c.execute("DROP TABLE IF EXISTS identity")
+    c.execute("DROP TABLE IF EXISTS archives")
 
     c.commit()
     c.close()
@@ -168,15 +152,6 @@ def _format_session_summary(raw: str) -> str:
     return "\n".join(lines) if lines else raw
 
 
-def _session_mood(raw: str) -> str:
-    data = _loads_summary(raw)
-    if data and data.get("mood"):
-        return str(data["mood"])
-    if raw:
-        return "旧版纯文本记录"
-    return "无"
-
-
 def _coerce_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -207,11 +182,6 @@ def _coerce_examples(value: Any) -> list[dict[str, str] | str]:
     return cleaned
 
 
-def _archive_source_block(row: sqlite3.Row) -> str:
-    ts = _display_time(row["created_at"])
-    return f"【{row['room']}】{ts}\n{_format_session_summary(row['summary'])}"
-
-
 # -- Tools ----------------------------------------------------------------
 @mcp.tool()
 def pack(from_room: str, to_room: str, recent_context: str, note: str) -> str:
@@ -239,9 +209,9 @@ def pack(from_room: str, to_room: str, recent_context: str, note: str) -> str:
 
 @mcp.tool()
 def arrive(room: str) -> str:
-    """到达房间。读取身份信息、待读便签、当前房间最近一条 session。
+    """到达房间。读取门口待读便签，读完即焚。
 
-    进入新 chat 开头调用。便签读完即焚，会自动标记 consumed=1。
+    只返回便签内容。没有便签时返回空字符串。
 
     Args:
         room: 当前房间，如“卧室”“书房”“工坊”
@@ -250,11 +220,6 @@ def arrive(room: str) -> str:
     _cleanup(c)
 
     parts: list[str] = []
-
-    id_rows = c.execute("SELECT key, value FROM identity ORDER BY key").fetchall()
-    if id_rows:
-        lines = [f"  {r['key']}: {r['value']}" for r in id_rows]
-        parts.append("🪪 身份信息:\n" + "\n".join(lines))
 
     handoffs = c.execute(
         """
@@ -283,27 +248,11 @@ def arrive(room: str) -> str:
             lines.append(f"  【状态】{r['note']}")
             parts.append("\n".join(lines))
 
-    session = c.execute(
-        """
-        SELECT summary, created_at
-        FROM sessions
-        WHERE room = ?
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (room,),
-    ).fetchone()
-    if session:
-        parts.append(
-            f"📋 {room}上次 session ({_display_time(session['created_at'])}):\n"
-            + _format_session_summary(session["summary"])
-        )
-
     c.commit()
     c.close()
 
     if not parts:
-        return f"🚪 {room}门口什么都没有，也没有设置过身份信息。"
+        return ""
     return "\n\n".join(parts)
 
 
@@ -351,35 +300,24 @@ def wrap_up(
 
 
 @mcp.tool()
-def peek(room: str = "", limit: int = 5) -> str:
-    """看隔壁。查看某个房间或所有房间最近的 session 记录。
+def peek(room: str, limit: int = 5) -> str:
+    """看隔壁。查看某个房间最近的 session 记录。
 
     Args:
-        room: 要查看的房间名，留空则查看所有房间
+        room: 要查看的房间名，必须传
         limit: 返回条数，默认 5
     """
     c = _conn()
-    if room:
-        rows = c.execute(
-            """
-            SELECT room, summary, created_at
-            FROM sessions
-            WHERE room = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (room, limit),
-        ).fetchall()
-    else:
-        rows = c.execute(
-            """
-            SELECT room, summary, created_at
-            FROM sessions
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+    rows = c.execute(
+        """
+        SELECT room, summary, created_at
+        FROM sessions
+        WHERE room = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (room, limit),
+    ).fetchall()
     c.close()
 
     if not rows:
@@ -390,181 +328,6 @@ def peek(room: str = "", limit: int = 5) -> str:
         for r in rows
     ]
     return "\n\n".join(entries)
-
-
-@mcp.tool()
-def rooms() -> str:
-    """房间概览。查看所有房间最近活动、待读便签数和最近 mood。"""
-    c = _conn()
-    _cleanup(c)
-
-    pending = c.execute(
-        """
-        SELECT to_room, COUNT(*) AS cnt
-        FROM handoffs
-        WHERE consumed = 0
-        GROUP BY to_room
-        """
-    ).fetchall()
-    latest = c.execute(
-        """
-        SELECT s.room, s.created_at, s.summary
-        FROM sessions s
-        JOIN (
-            SELECT room, MAX(created_at) AS max_created_at
-            FROM sessions
-            GROUP BY room
-        ) latest
-        ON s.room = latest.room AND s.created_at = latest.max_created_at
-        """
-    ).fetchall()
-    c.commit()
-    c.close()
-
-    pending_map = {r["to_room"]: r["cnt"] for r in pending}
-    latest_map = {r["room"]: r for r in latest}
-    all_rooms = sorted(set(pending_map) | set(latest_map))
-
-    if not all_rooms:
-        return "🏠 还没有任何房间记录。"
-
-    lines = ["🏠 房间概览:"]
-    for rm in all_rooms:
-        latest_row = latest_map.get(rm)
-        last_active = (
-            _display_time(latest_row["created_at"]) if latest_row else "无记录"
-        )
-        mood = _session_mood(latest_row["summary"]) if latest_row else "无"
-        pending_count = pending_map.get(rm, 0)
-        tag = f"；📬 {pending_count}条待读" if pending_count else ""
-        lines.append(f"  • {rm} - 最近活跃 {last_active}；mood: {mood}{tag}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def archive(room: str, limit: int = 0, summary: str = "") -> str:
-    """归档。无 summary 时读取 session 原文；有 summary 时写入阶段档案。
-
-    Args:
-        room: 要归档的房间
-        limit: 读取最近几条 session；0 表示读取该房间全部 session
-        summary: Claude 写好的阶段压缩总结；留空则为读取模式
-    """
-    c = _conn()
-
-    if summary.strip():
-        if limit > 0:
-            session_rows = c.execute(
-                """
-                SELECT id
-                FROM sessions
-                WHERE room = ? AND archived = 0
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (room, limit),
-            ).fetchall()
-        else:
-            session_rows = c.execute(
-                """
-                SELECT id
-                FROM sessions
-                WHERE room = ? AND archived = 0
-                ORDER BY created_at DESC
-                """,
-                (room,),
-            ).fetchall()
-
-        session_ids = [r["id"] for r in session_rows]
-        if not session_ids:
-            c.close()
-            return f"📭 {room}没有未归档的 session，档案未保存。"
-
-        c.execute(
-            """
-            INSERT INTO archives (room, summary, session_count, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (room, summary.strip(), len(session_ids), _now()),
-        )
-        placeholders = ",".join("?" * len(session_ids))
-        c.execute(
-            f"UPDATE sessions SET archived = 1 WHERE id IN ({placeholders})",
-            session_ids,
-        )
-        c.commit()
-        c.close()
-        return f"✓ {room}档案已保存，压缩范围：{len(session_ids)} 条 session。"
-
-    if limit and limit > 0:
-        rows = c.execute(
-            """
-            SELECT id, room, summary, created_at
-            FROM sessions
-            WHERE room = ? AND archived = 0
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (room, limit),
-        ).fetchall()
-    else:
-        rows = c.execute(
-            """
-            SELECT id, room, summary, created_at
-            FROM sessions
-            WHERE room = ? AND archived = 0
-            ORDER BY created_at DESC
-            """,
-            (room,),
-        ).fetchall()
-    c.close()
-
-    if not rows:
-        return f"📭 {room}暂无可归档的 session。"
-
-    blocks = [_archive_source_block(r) for r in rows]
-    instruction = (
-        "请根据以上 session 写一段阶段级档案 summary，保留长期有用的信息，"
-        "压缩掉鸡毛蒜皮。写好后再次调用 archive(room, limit, summary) 保存。"
-    )
-    return "\n\n".join(blocks) + "\n\n" + instruction
-
-
-@mcp.tool()
-def set_identity(key: str, value: str) -> str:
-    """设置持久身份信息。只需设一次，每次 arrive 自动附带。
-
-    Args:
-        key: 标签名，如“关系”“称呼”“学习偏好”
-        value: 内容
-    """
-    c = _conn()
-    c.execute(
-        """
-        INSERT INTO identity (key, value, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE
-        SET value = excluded.value, updated_at = excluded.updated_at
-        """,
-        (key, value, _now()),
-    )
-    c.commit()
-    c.close()
-    return f"✓ 身份信息已设置: {key}"
-
-
-@mcp.tool()
-def clear_identity(key: str) -> str:
-    """删除一条持久身份信息。
-
-    Args:
-        key: 要删除的标签名
-    """
-    c = _conn()
-    c.execute("DELETE FROM identity WHERE key = ?", (key,))
-    c.commit()
-    c.close()
-    return f"✓ 已删除: {key}"
 
 
 # -- Entrypoint -----------------------------------------------------------
