@@ -300,12 +300,12 @@ def wrap_up(
 
 
 @mcp.tool()
-def peek(room: str, limit: int = 5) -> str:
+def peek(room: str, limit: int = 1) -> str:
     """看隔壁。查看某个房间最近的 session 记录。
 
     Args:
         room: 要查看的房间名，必须传
-        limit: 返回条数，默认 5
+        limit: 返回条数，默认 1
     """
     c = _conn()
     rows = c.execute(
